@@ -8,7 +8,8 @@ The LLM never invents facts; it can only request tool calls and cite results.
 from __future__ import annotations
 
 import time
-from typing import Awaitable, Callable, Protocol
+from collections.abc import Awaitable, Callable
+from typing import Protocol
 
 import httpx
 from pydantic import BaseModel, ValidationError

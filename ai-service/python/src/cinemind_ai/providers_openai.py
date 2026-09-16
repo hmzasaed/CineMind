@@ -9,7 +9,6 @@ facts and confidence is lowered so callers never mistake prose for facts.
 from __future__ import annotations
 
 import json
-import time
 
 from openai import AsyncOpenAI
 

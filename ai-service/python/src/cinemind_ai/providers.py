@@ -6,7 +6,7 @@ import logging
 from typing import Protocol
 
 from .config import Settings
-from .models import ChatMessage, ProviderResult, ToolCall
+from .models import ChatMessage, ProviderResult
 from .tools import ToolRegistry
 
 logger = logging.getLogger("cinemind_ai.providers")

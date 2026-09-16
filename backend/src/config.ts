@@ -32,5 +32,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       .join("; ");
     throw new Error(`Invalid environment configuration: ${message}`);
   }
-  return parsed.data as AppConfig;
+  const v = parsed.data;
+  return {
+    port: v.BACKEND_PORT,
+    logLevel: v.BACKEND_LOG_LEVEL,
+    rateLimitMaxRequests: v.RATE_LIMIT_MAX_REQUESTS,
+    rateLimitWindowMs: v.RATE_LIMIT_WINDOW_MS,
+    jwtSecret: v.JWT_SECRET,
+    movieProvider: v.MOVIE_PROVIDER,
+    tmdbApiKey: v.TMDB_API_KEY,
+    tmdbApiBaseUrl: v.TMDB_API_BASE_URL,
+  };
 }

@@ -2,7 +2,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import jwt from "@fastify/jwt";
 import rateLimit from "@fastify/rate-limit";
 import { loadConfig, type AppConfig } from "./config.js";
-import { createLogger } from "./logger.js";
+import { loggerOptions } from "./logger.js";
 import { createMovieProvider, InMemoryWatchlistStore } from "./providers/index.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { makeRequestLogHook } from "./middleware/request-log.js";
@@ -16,8 +16,10 @@ export interface AppDeps {
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const { config } = deps;
-  const logger = createLogger(config);
-  const app = Fastify({ logger, disableRequestLogging: true });
+  const app = Fastify({
+    logger: loggerOptions(config),
+    disableRequestLogging: true,
+  });
 
   await app.register(rateLimit, {
     max: config.rateLimitMaxRequests,
@@ -28,8 +30,9 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     await app.register(jwt, { secret: config.jwtSecret });
   }
 
-  app.addHook("onRequest", makeRequestLogHook(logger));
-  app.setErrorHandler(errorHandler(logger));
+  const onResponseLog = makeRequestLogHook(app.log);
+  app.addHook("onResponse", onResponseLog);
+  app.setErrorHandler(errorHandler(app.log));
 
   const provider = createMovieProvider(config);
   const watchlistStore = new InMemoryWatchlistStore();

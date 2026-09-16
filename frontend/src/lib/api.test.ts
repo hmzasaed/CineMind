@@ -1,17 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { ApiClient } from "../src/lib/api";
+import { ApiClient } from "./api";
 
 describe("ApiClient", () => {
   it("sends auth token and parses movies search", async () => {
-    let captured: { url: string; headers: Headers } | null = null;
-    const client = new ApiClient(
-      "http://test",
-      () => "tok-123",
-    );
+    const captured: { url?: string; init?: unknown } = {};
+    const client = new ApiClient("http://test", () => "tok-123");
 
     const originalFetch = globalThis.fetch;
     globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
-      captured = { url: String(input), headers: init?.headers as Headers };
+      captured.url = String(input);
+      captured.init = init;
       return Promise.resolve(
         new Response(
           JSON.stringify({
@@ -25,8 +23,8 @@ describe("ApiClient", () => {
 
     try {
       const result = await client.searchMovies("dark knight");
-      expect(captured?.url).toBe("http://test/movies?title=dark+knight");
-      expect(captured?.headers).toMatchObject({ Authorization: "Bearer tok-123" });
+      expect(captured.url).toBe("http://test/movies?title=dark+knight");
+      expect(captured.init).toMatchObject({ headers: { Authorization: "Bearer tok-123" } });
       expect(result.movies[0].id).toBe("tt0468569");
       expect(result.provenance.sourceKind).toBe("static");
     } finally {

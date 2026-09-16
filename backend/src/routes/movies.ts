@@ -11,21 +11,17 @@ const searchQuery = z.object({
 });
 
 export function registerMovieRoutes(app: FastifyInstance, provider: MovieDataProvider): void {
-  /**
-   * Movie facts come only from the structured provider. The response includes
-   * provenance (source + confidence) so clients and the AI service can cite facts.
-   */
-  app.get("/movies/:id", async (req, reply) => {
+  app.get("/movies/:id", async (req) => {
     const params = getMovieParams.safeParse(req.params);
-    if (!params.success) return badRequest("Invalid movie id");
+    if (!params.success) throw badRequest("Invalid movie id");
     const fact = await provider.getMovie(params.data.id);
-    if (!fact.value) return notFound("Movie not found");
+    if (!fact.value) throw notFound("Movie not found");
     return { movie: fact.value, provenance: fact.provenance };
   });
 
-  app.get("/movies", async (req, reply) => {
+  app.get("/movies", async (req) => {
     const query = searchQuery.safeParse(req.query);
-    if (!query.success) return badRequest("Invalid search query");
+    if (!query.success) throw badRequest("Invalid search query");
     const fact = await provider.search(query.data);
     return { movies: fact.value, provenance: fact.provenance };
   });

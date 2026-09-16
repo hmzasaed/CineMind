@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -18,7 +18,7 @@ def _fact(title: str) -> Fact:
             source_kind=SourceKind.API,
             source_name="tmdb",
             source_id=f"tmdb:movie:{title.lower()}",
-            retrieved_at=datetime.now(timezone.utc),
+            retrieved_at=datetime.now(UTC),
             confidence=0.99,
         ),
     )

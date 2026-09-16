@@ -1,0 +1,19 @@
+{
+  "name": "cinemind",
+  "private": true,
+  "scripts": {
+    "dev:backend": "pnpm --filter @cinemind/backend dev",
+    "dev:frontend": "pnpm --filter @cinemind/frontend dev",
+    "dev:ai": "cd ai-service && python -m uvicorn src.main:app --reload",
+    "build:backend": "pnpm --filter @cinemind/backend build",
+    "build:frontend": "pnpm --filter @cinemind/frontend build",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "db:migrate": "cd supabase && npx supabase db push"
+  },
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=9"
+  }
+}

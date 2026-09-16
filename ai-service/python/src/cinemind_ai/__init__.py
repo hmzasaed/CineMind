@@ -1,0 +1,1 @@
+"""CineMind AI service package."""

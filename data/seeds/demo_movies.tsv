@@ -1,0 +1,9 @@
+# Reference facts for the demo catalog. These are STATIC facts: they are
+# checked in, versioned, and shipped with provenance source_kind = 'static'.
+#
+# Columns: id | title | release_year | runtime_minutes | genres (comma) | rating_average | rating_votes
+tt0111161|The Shawshank Redemption|1994|142|Drama|9.3|2800000
+tt0468569|The Dark Knight|2008|152|Action,Crime,Drama|9.0|2700000
+tt1375666|Inception|2010|148|Action,Sci-Fi,Thriller|8.8|2400000
+tt0110912|Pulp Fiction|1994|154|Crime,Drama|8.9|2100000
+tt0068646|The Godfather|1972|175|Crime,Drama|9.2|1900000

@@ -41,7 +41,7 @@ docs/       This documentation.
 | Authorization | backend | JWT verification for user data |
 | Rate limiting | backend/ai | per-client and per-IP |
 | Provenance | everywhere | source id, kind, name, timestamp, confidence |
-| Conflict handling | backend | duplicate watchlist adds -> 409 |
+| Conflict handling | DB + backend | `movie_sources` conflict ledger; unique keys |
 | Observability | backend/ai | bounded structured logs, request ids |
 | No secrets to browser | frontend | only `VITE_` env, never keys |
 | No chain-of-thought | ai-service | public models have no reasoning field |
@@ -89,6 +89,11 @@ cd supabase && npx supabase db push
 
 Default provider for the backend is `mock` (bundled static facts, provenance
 `static`). Set `MOVIE_PROVIDER=tmdb` + `TMDB_API_KEY` for a real catalog.
+
+LLM provider is selected with `LLM_PROVIDER`. Free options: `groq` (Groq),
+`mistral` (Mistral), `gemini` (Google). Each needs its own free API key and
+uses the OpenAI-compatible protocol. `rule-based` is the offline dev default.
+See `ai-service/python/.env.example` and `docs/providers.md`.
 
 ## Non-goals (explicitly out of scope)
 

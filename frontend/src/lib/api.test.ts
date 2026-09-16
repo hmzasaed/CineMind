@@ -1,5 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup } from "@testing-library/react";
 import { ApiClient } from "./api";
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 describe("ApiClient", () => {
   it("sends auth token and parses movies search", async () => {
@@ -32,6 +38,20 @@ describe("ApiClient", () => {
     }
   });
 
+  it("omits the Authorization header when signed out", async () => {
+    const captured: { init?: unknown } = {};
+    globalThis.fetch = ((_input: RequestInfo | URL, init?: RequestInit) => {
+      captured.init = init;
+      return Promise.resolve(new Response(JSON.stringify({ movies: [], provenance: {} }), { status: 200 }));
+    }) as typeof fetch;
+    const client = new ApiClient("http://test", () => null);
+
+    await client.searchMovies("interstellar");
+
+    const headers = (captured.init as RequestInit).headers as Record<string, string>;
+    expect(headers.Authorization).toBeUndefined();
+  });
+
   it("surfaces backend error messages", async () => {
     globalThis.fetch = (() =>
       Promise.resolve(
@@ -42,5 +62,17 @@ describe("ApiClient", () => {
       )) as typeof fetch;
     const client = new ApiClient("http://test");
     await expect(client.addToWatchlist("tt0468569")).rejects.toThrow("already on the watchlist");
+  });
+
+  it("throws Unauthorized on 401 responses", async () => {
+    globalThis.fetch = (() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ error: { code: "UNAUTHORIZED", message: "Unauthorized" } }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        }),
+      )) as typeof fetch;
+    const client = new ApiClient("http://test", () => null);
+    await expect(client.getMe()).rejects.toThrow("Unauthorized");
   });
 });

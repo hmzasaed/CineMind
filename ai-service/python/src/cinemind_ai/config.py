@@ -13,9 +13,26 @@ class Settings(BaseSettings):
     ai_service_rate_limit: str = "30/minute"
 
     cinemind_backend_base_url: str = "http://localhost:3000"
+
+    # Provider selection. rule-based | openai | groq | mistral | gemini
     llm_provider: str = "rule-based"
+
+    # OpenAI (paid default; free providers below)
     openai_api_key: str | None = None
     openai_model: str = "gpt-4o-mini"
+
+    # Groq (free tier) — OpenAI-compatible
+    groq_api_key: str | None = None
+    groq_model: str = "llama-3.3-70b-versatile"
+
+    # Mistral (free tier) — OpenAI-compatible
+    mistral_api_key: str | None = None
+    mistral_model: str = "open-mistral-nemo-2407"
+
+    # Google Gemini (free tier) — OpenAI-compatible endpoint
+    gemini_api_key: str | None = None
+    gemini_model: str = "gemini-2.0-flash"
+
     provider_timeout_seconds: float = 30.0
     backend_timeout_seconds: float = 10.0
 

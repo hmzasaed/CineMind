@@ -1,3 +1,6 @@
+import { useMemo } from "react";
+import { useAuth } from "./auth-context";
+
 export type SourceKind =
   | "database"
   | "api"
@@ -31,11 +34,27 @@ export interface SearchResponse {
   provenance: Provenance;
 }
 
-export interface ApiError {
-  error?: { code?: string; message?: string };
+export interface CurrentUser {
+  id: string;
+  email: string | null;
+  role: "user" | "admin" | null;
+  authRole: string;
+}
+
+export interface ApiErrorBody {
+  error?: {
+    code?: string;
+    message?: string;
+    retryAfter?: string;
+  };
 }
 
 const BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "http://localhost:3000";
+
+function messageFor(res: Response, body: ApiErrorBody | null): string {
+  if (body?.error?.message) return body.error.message;
+  return `Request failed with ${res.status}`;
+}
 
 export class ApiClient {
   constructor(
@@ -43,8 +62,8 @@ export class ApiClient {
     private readonly tokenProvider: (() => string | null) | null = null,
   ) {}
 
-  private headers(): Record<string, string> {
-    const h: Record<string, string> = { Accept: "application/json" };
+  private headers(extra?: Record<string, string>): Record<string, string> {
+    const h: Record<string, string> = { Accept: "application/json", ...extra };
     const token = this.tokenProvider?.();
     if (token) h.Authorization = `Bearer ${token}`;
     return h;
@@ -61,19 +80,33 @@ export class ApiClient {
   async addToWatchlist(movieId: string): Promise<void> {
     const res = await fetch(`${this.baseUrl}/watchlist`, {
       method: "POST",
-      headers: { ...this.headers(), "Content-Type": "application/json" },
+      headers: this.headers({ "Content-Type": "application/json" }),
       body: JSON.stringify({ movieId }),
     });
     await this.parse(res);
   }
 
+  async getMe(): Promise<{ user: CurrentUser }> {
+    const res = await fetch(`${this.baseUrl}/auth/me`, { headers: this.headers() });
+    return this.parse<{ user: CurrentUser }>(res);
+  }
+
   private async parse<T>(res: Response): Promise<T> {
-    const body = (await res.json().catch(() => null)) as (T & ApiError) | null;
+    const body = (await res.json().catch(() => null)) as (T & ApiErrorBody) | null;
     if (!res.ok) {
-      throw new Error(body?.error?.message ?? `Request failed with ${res.status}`);
+      throw new Error(messageFor(res, body));
     }
     return body as T;
   }
 }
 
-export const api = new ApiClient();
+/** ApiClient wired to the current Supabase session access token. */
+export function useApi(): ApiClient {
+  const { accessToken } = useAuth();
+  return useMemo(
+    () => new ApiClient(undefined, () => accessToken),
+    // The client is cheap to rebuild and must capture the freshest token,
+    // e.g. right after an automatic session refresh.
+    [accessToken],
+  );
+}

@@ -26,17 +26,32 @@ to a backend 502 by the caller, never to a synthesized movie.
 
 Interface: `src/cinemind_ai/providers.py` (`ChatProvider` protocol).
 
-Implemented: `rule-based` (offline, deterministic; dev/tests only), `openai`
-(real chat + tool calling).
+Implemented:
+- `rule-based` — offline, deterministic, NOT an LLM. Default for tests/dev.
+- `openai`, `groq`, `mistral`, `gemini` — real chat + tool calling via the
+  **OpenAI-compatible protocol** (`OpenAiCompatProvider` in
+  `providers_compat.py`). All four speak the same wire protocol, so one client
+  implementation serves them; only base URL, key, and model differ.
 
-Config: `LLM_PROVIDER`. A provider may refuse to start without its required key.
+Config: `LLM_PROVIDER` selects the implementation. A provider refuses to start
+without its own key.
+- `openai` → `https://api.openai.com/v1` (paid)
+- `groq` → `https://api.groq.com/openai/v1` (free) — console.groq.com
+- `mistral` → `https://api.mistral.ai/v1` (free tier) — console.mistral.ai
+- `gemini` → `https://generativelanguage.googleapis.com/v1beta/openai` (free tier) — aistudio.google.com
 
-To add a provider (e.g. Anthropic):
+Free-tier model defaults live in `config.py` and are overridable per provider
+(`GROQ_MODEL`, `MISTRAL_MODEL`, `GEMINI_MODEL`). Check each console for the
+current free model list.
 
-1. Implement the `ChatProvider` protocol returning `ProviderResult`.
-2. Keep tool-calling bounded (max loop; see `providers_openai.py`).
-3. Add an extras package dependency under `[project.optional-dependencies]`.
-4. Select it in `build_provider`.
+To add a provider:
+
+1. Add a row to `_compat_spec()` in `providers.py` (base URL + key + default
+   model) if it is OpenAI-compatible.
+2. Or implement the `ChatProvider` protocol directly for non-compatible APIs
+   (e.g. Anthropic), returning `ProviderResult`.
+3. Keep tool-calling bounded (max loop; see `providers_compat.py`).
+4. Add the SDK under `[project.optional-dependencies]` if needed.
 
 A provider must never emit facts on its own: the only fact path is a `ToolResult`
 whose facts carry provenance from the structured backend.
@@ -51,8 +66,8 @@ only call tools in the registry; there is no free-form document access.
 
 - Backend: pino, per-request id, redacted secrets, bounded log fields.
 - AI service: structured summaries with provider, tools, duration, error codes,
-  confidence. Persist to `ai_op_logs` (service-role) via the backend or a
-  worker; the table is RLS-closed to clients.
+  confidence. Persist to `agent_runs` / `agent_tool_calls` (service-role)
+  via the backend or a worker; both tables are RLS-closed to clients.
 
 ## Testing a new provider
 

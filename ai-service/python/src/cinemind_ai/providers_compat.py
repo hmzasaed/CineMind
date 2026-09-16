@@ -1,9 +1,16 @@
-"""Real (async) OpenAI chat provider with tool calling.
+"""Real (async) OpenAI-compatible chat provider with tool calling.
 
-The model may only emit tool_use requests; every fact in the final answer is
-expected to be backed by a tool result annotated with provenance. If the model
-refuses to call tools when they were offered, the answer is returned WITHOUT
-facts and confidence is lowered so callers never mistake prose for facts.
+Works against any provider that speaks the OpenAI chat-completions protocol:
+OpenAI, Groq, Mistral, Google Gemini (generativelanguage OpenAI endpoint), etc.
+The endpoint, key, and model are injected via configuration; the provider never
+hardcodes a vendor. The free tiers of Groq, Mistral, and Google are supported.
+
+Guardrails:
+- The model may only emit tool_use requests; every fact in the final answer is
+  expected to be backed by a tool result annotated with provenance.
+- If the model returns text without calling tools, the answer is returned
+  WITHOUT facts so callers never mistake prose for facts.
+- Tool-calling is bounded to a fixed number of rounds.
 """
 
 from __future__ import annotations
@@ -16,11 +23,18 @@ from .models import ChatMessage, Fact, ProviderResult, Role, ToolCall
 from .tools import ToolRegistry
 
 
-class OpenAiProvider:
-    name = "openai"
-
-    def __init__(self, *, api_key: str, model: str, timeout_seconds: float) -> None:
-        self._client = AsyncOpenAI(api_key=api_key, timeout=timeout_seconds)
+class OpenAiCompatProvider:
+    def __init__(
+        self,
+        *,
+        provider_name: str,
+        base_url: str,
+        api_key: str,
+        model: str,
+        timeout_seconds: float,
+    ) -> None:
+        self.name = provider_name
+        self._client = AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=timeout_seconds)
         self._model = model
 
     def _tools_json(self, registry: ToolRegistry) -> list[dict]:
@@ -94,7 +108,9 @@ class OpenAiProvider:
                     {
                         "role": "tool",
                         "tool_call_id": tc.id,
-                        "content": json.dumps({"ok": result.ok, "facts": [f.model_dump(mode="json") for f in result.facts] or result.error_code}),
+                        "content": json.dumps(
+                            {"ok": result.ok, "facts": [f.model_dump(mode="json") for f in result.facts] or result.error_code}
+                        ),
                     }
                 )
 

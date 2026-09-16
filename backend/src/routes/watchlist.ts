@@ -1,33 +1,32 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, preHandlerHookHandler } from "fastify";
 import { z } from "zod";
 import type { MovieDataProvider, WatchlistStore } from "../providers/types.js";
-import { requireAuth } from "../middleware/auth.js";
 import { badRequest, conflict } from "../errors.js";
 
 const addBody = z.object({
   movieId: z.string().min(1).max(64),
 });
 
-function userIdOf(req: { user?: unknown }): string | undefined {
-  const u = req.user as { userId?: string } | undefined;
-  return u?.userId;
-}
-
 /**
  * User-owned data with conflict handling. Adding a movie you already have is a
  * 409 so the client can present a choice instead of a silent overwrite.
+ * The requireAuth preHandler attaches req.auth; store keys are derived from
+ * the verified token, never from client-supplied input.
  */
-export function registerWatchlistRoutes(app: FastifyInstance, provider: MovieDataProvider, store: WatchlistStore): void {
+export function registerWatchlistRoutes(
+  app: FastifyInstance,
+  provider: MovieDataProvider,
+  store: WatchlistStore,
+  requireAuth: preHandlerHookHandler,
+): void {
   app.get("/watchlist", { preHandler: requireAuth }, async (req, reply) => {
-    const userId = userIdOf(req);
-    if (!userId) throw badRequest("Missing user id in token");
+    const userId = req.auth!.userId;
     const entries = await store.list(userId);
     return reply.send({ watchlist: entries });
   });
 
   app.post("/watchlist", { preHandler: requireAuth }, async (req, reply) => {
-    const userId = userIdOf(req);
-    if (!userId) throw badRequest("Missing user id in token");
+    const userId = req.auth!.userId;
     const body = addBody.safeParse(req.body);
     if (!body.success) throw badRequest("Invalid watchlist payload");
 
@@ -43,8 +42,7 @@ export function registerWatchlistRoutes(app: FastifyInstance, provider: MovieDat
   });
 
   app.delete("/watchlist/:movieId", { preHandler: requireAuth }, async (req, reply) => {
-    const userId = userIdOf(req);
-    if (!userId) throw badRequest("Missing user id in token");
+    const userId = req.auth!.userId;
     const params = z.object({ movieId: z.string().min(1).max(64) }).safeParse(req.params);
     if (!params.success) throw badRequest("Invalid movie id");
     await store.remove(userId, params.data.movieId);

@@ -37,6 +37,22 @@ export function makeRequireAuth(verifier: TokenVerifier) {
 }
 
 /**
+ * Attaches req.auth when a valid bearer token is present, but never rejects
+ * the request — for public endpoints whose response shape depends on whether
+ * the caller is known (e.g. including a viewer's own hidden review, or
+ * likedByMe). An invalid/expired token is treated the same as no token: the
+ * request proceeds anonymously rather than failing.
+ */
+export function makeOptionalAuth(verifier: TokenVerifier) {
+  return async function optionalAuth(req: FastifyRequest): Promise<void> {
+    const token = parseBearer(req.headers.authorization);
+    if (!token) return;
+    const user = await verifier.verify(token);
+    if (user) req.auth = user;
+  };
+}
+
+/**
  * Role-aware authorization. Runs after requireAuth and resolves the user's
  * application role from the profile store, so a token alone never grants
  * admin - the stored role does.

@@ -1,3 +1,4 @@
+import "./env.js"; // must precede loadConfig — it only reads process.env
 import { buildApp } from "./app.js";
 import { loadConfig } from "./config.js";
 

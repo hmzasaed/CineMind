@@ -83,13 +83,15 @@ the LLM, Supabase for the database, TMDB or bundled static data for movie facts.
 - **Backend** — Fastify + TypeScript. Auth (Supabase JWT verification via JWKS
   or a local HS256 verifier), role-aware authorization, Helmet security
   headers, CORS, rate limiting, Zod validation, provenance, conflict handling
-  (409 on duplicate watchlist entries), structured request logs.
+  (409 on duplicate watchlist entries), structured request logs. Movie facts
+  flow through a provider adapter (timeout/retry/rate-limit/cache decorators)
+  and are persisted by a background ingestion worker.
 - **AI service** — FastAPI + Pydantic. Chat endpoint with typed tools, a
   provider interface, sanitization for untrusted web content, bounded
   operational summaries, per-IP rate limiting.
-- **Supabase** — Postgres schema with RLS on all 21 tables;
+- **Supabase** — Postgres schema with RLS on all 25 tables;
   `agent_runs`/`agent_tool_calls` are readable/writable only by the service
-  role.
+  role; `ingestion_jobs` is service-role-only (no client policies).
 - **data/** — versioned reference data and seeds (static facts, provenance
   `static`).
 
@@ -233,11 +235,29 @@ python --version # want 3.11/3.12
 
 ```bash
 pnpm install                              # installs frontend + backend deps
-cd backend
-Copy-Item .env.example .env               # Windows PowerShell
+Copy-Item .env.example .env               # Windows PowerShell (run at the repo root)
 cp .env.example .env                       # Linux/macOS
 pnpm --filter @cinemind/backend dev       # http://localhost:3000
 ```
+
+The backend loads the **repo-root `.env`** at startup via `backend/src/env.ts`
+(imported first by `server.ts` and `worker.ts`); a `backend/.env` is picked up
+too if you want a per-service override. Vars that are present but blank
+(`JWT_SECRET=` with nothing after it) are treated as unset, so you can leave
+anything you don't need empty. Tests never read `.env` — they build their
+config explicitly.
+
+If `MOVIE_PROVIDER=tmdb`, run the ingestion worker in a second terminal:
+
+```bash
+pnpm dev:worker                           # polls and processes ingestion jobs
+```
+
+With `MOVIE_PROVIDER=mock` the worker is optional — the backend uses in-memory
+stores for ingestion and jobs, so no background process is needed for local dev
+or tests. For production / real data, the worker must be running and Supabase
+credentials (`SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`) must be set so the
+worker can persist facts.
 
 Key settings (see [Configuration reference](#configuration-reference)):
 
@@ -306,10 +326,11 @@ cd supabase
 npx supabase login
 npx supabase init
 npx supabase link --project-ref <your-project-ref>
-npx supabase db push                     # applies migrations/00001_initial_schema.sql
+npx supabase db push                     # applies migrations 00001–00004
 ```
 
-The migration creates:
+The current schema lives in `supabase/migrations/` (25 tables across
+`00001`–`00004`). The migration creates:
 
 - `profiles` — user rows; RLS says users manage only their own row.
 - `movies` — structured facts, written only by server pipelines (service
@@ -317,10 +338,15 @@ The migration creates:
 - `watchlists` — user-owned rows; DB primary key `(user_id, movie_id)`
   enforces uniqueness, so duplicate adds are rejected.
 - `agent_runs` / `agent_tool_calls` — AI observability; RLS-closed to clients,
-  service role only. Full table reference in `docs/database.md`.
-
-> The backend currently ships an in-memory watchlist store for dev. Wiring the
-> Supabase store into `WatchlistStore` is on the roadmap.
+  service role only.
+- `production_companies` / `movie_production_companies` / `ingestion_jobs` —
+  provider-retrieved company facts and the worker's job queue (service-role
+  only; no client policies).
+- `movie_ratings` / `movie_rating_categories` / `reviews` / `review_likes` /
+  `review_reports` / `watchlists` / `favorites` / `watch_history` — user
+  ratings, reviews, likes, reports, and library state, all Supabase-backed
+  (see `docs/ratings.md`, `docs/reviews.md`, `docs/moderation.md`,
+  `docs/watchlist-favorites.md`). Full table reference in `docs/database.md`.
 
 ---
 
@@ -339,6 +365,12 @@ The migration creates:
 | `JWT_SECRET`                    | backend      | —                       | local-dev/tests HS256 verifier (>= 24 chars) |
 | `MOVIE_PROVIDER`                | backend      | `mock`                  | `mock` or `tmdb`                           |
 | `TMDB_API_KEY`                  | backend      | —                       | free TMDB key (only for `tmdb`)            |
+| `PROVIDER_TIMEOUT_MS`           | backend      | `8000`                  | max time per provider request              |
+| `PROVIDER_RETRY_LIMIT`          | backend      | `2`                     | retries for transient provider errors (1-5) |
+| `PROVIDER_BASE_BACKOFF_MS`      | backend      | `200`                   | initial backoff before a retry             |
+| `PROVIDER_CACHE_TTL_MS`         | backend      | `300000`                | provider response cache TTL (5 min)        |
+| `PROVIDER_CACHE_STALE_ON_ERROR` | backend      | `false`                 | serve stale cache on transient failure     |
+| `JOB_POLL_INTERVAL_MS`          | backend      | `5000`                  | worker poll interval for pending jobs      |
 | `AI_SERVICE_PORT`               | ai-service   | `8000`                  | HTTP port (uvicorn flag may override)      |
 | `AI_SERVICE_LOG_LEVEL`          | ai-service   | `info`                  | log level                                  |
 | `AI_SERVICE_RATE_LIMIT`         | ai-service   | `30/minute`             | per-IP rate limit                          |
@@ -363,11 +395,47 @@ The migration creates:
 | GET    | `/health`              | none  | liveness                                               |
 | GET    | `/movies/:id`          | none  | one movie + provenance                                 |
 | GET    | `/movies?title=&year=` | none  | search + provenance                                    |
+| GET    | `/movies/upcoming`     | none  | upcoming releases + provenance                         |
+| GET    | `/movies/:id/credits`  | none  | cast/crew + provenance                                  |
+| GET    | `/movies/:id/images`   | none  | image URLs + provenance                                 |
+| GET    | `/movies/:id/ratings`  | none  | external aggregate ratings + provenance                 |
+| GET    | `/movies/:id/companies`| none  | production companies + provenance                       |
+| GET    | `/movies/:id/financials`| none | budget/revenue + provenance                             |
 | GET    | `/auth/me`             | JWT   | verified identity + resolved app role                  |
 | GET    | `/admin/ping`          | JWT+admin | role-aware test endpoint (admin only)              |
+| GET    | `/admin/jobs`          | JWT+admin | list ingestion jobs (`limit`, `status`, `kind`)     |
+| GET    | `/admin/jobs/:id`      | JWT+admin | fetch one ingestion job                             |
+| POST   | `/admin/jobs`          | JWT+admin | enqueue an ingestion job (202)                      |
 | GET    | `/watchlist`           | JWT   | list my saved movies                                   |
 | POST   | `/watchlist`           | JWT   | add movie; 409 if already present                      |
 | DELETE | `/watchlist/:movieId`  | JWT   | remove movie                                           |
+| GET    | `/favorites`           | JWT   | list my favorites                                      |
+| PUT    | `/favorites/:movieId`  | JWT   | add favorite (idempotent)                               |
+| DELETE | `/favorites/:movieId`  | JWT   | remove favorite (idempotent)                            |
+| GET    | `/watch-history`       | JWT   | list my watch history (a rewatch log)                   |
+| POST   | `/watch-history`       | JWT   | add an entry (`movieId`, `status`, `progressSeconds?`)  |
+| DELETE | `/watch-history/:id`   | JWT   | remove an entry                                         |
+| GET    | `/movies/:id/rating`   | JWT   | my rating for this movie, or `null`                     |
+| PUT    | `/movies/:id/rating`   | JWT   | upsert my rating (`score` 1-10, optional `categories`)  |
+| DELETE | `/movies/:id/rating`   | JWT   | remove my rating                                        |
+| GET    | `/movies/:id/ratings/summary` | none | DB-only aggregate user rating (separate from `/movies/:id/ratings`) |
+| GET    | `/ratings/mine`        | JWT   | paginated list of my ratings across movies              |
+| GET    | `/movies/:id/reviews`  | optional | paginated, sortable reviews (`page`,`pageSize`,`sort`) |
+| POST   | `/movies/:id/reviews`  | JWT   | create a review; 409 if already reviewed; rate-limited  |
+| PATCH  | `/reviews/:id`         | JWT   | edit my review (404, not 403, if not the owner)         |
+| DELETE | `/reviews/:id`         | JWT   | delete my review                                        |
+| PUT    | `/reviews/:id/like`    | JWT   | like a review (idempotent)                              |
+| DELETE | `/reviews/:id/like`    | JWT   | unlike a review (idempotent)                            |
+| POST   | `/reviews/:id/report`  | JWT   | report a review; 409 if already reported; rate-limited  |
+| GET    | `/reviews/mine`        | JWT   | paginated list of my reviews across movies              |
+| GET    | `/profile/stats`       | JWT   | my profile statistics (reviews, ratings, watchlist, …)  |
+| GET    | `/admin/review-reports`| JWT+admin | list moderation reports (`status`, `page`, `pageSize`) |
+| PATCH  | `/admin/review-reports/:id` | JWT+admin | resolve or dismiss a report                       |
+| PATCH  | `/admin/reviews/:id/status` | JWT+admin | force a review's status, incl. `deleted`          |
+
+Movie endpoints set `x-provider` and `x-provider-cache` (`hit` | `miss` |
+`stale`) response headers, and each payload carries its own `provenance` plus
+the adapter's `attribution`.
 
 Auth column: `JWT` = a verified Supabase access token (`Bearer`).
 `JWT+admin` additionally requires `role = admin` on `public.profiles`.
@@ -424,6 +492,9 @@ one home, so changes stay small and localized.
 - `backend/src/providers/tmdb.ts` — provider fetches facts, decodes them with a
   Zod schema, and attaches provenance. Payloads that fail validation are
   rejected, never silently corrected.
+- `backend/src/providers/decorators.ts` — resilience stack (timeout, retry,
+  rate-limit cooldown, cache) applied uniformly to every provider call; errors
+  are normalized `ProviderError`s mapped by the central error handler.
 - `backend/src/providers/mock.ts` — deterministic static facts for dev/tests
   (sourceKind `static`). Explicitly `NOT an LLM` and not for production.
 - `ai-service/python/src/cinemind_ai/models.py` — the same model on the Python
@@ -475,7 +546,17 @@ one home, so changes stay small and localized.
 - `ai-service/python/src/cinemind_ai/providers.py` — `_compat_spec` maps
   `LLM_PROVIDER` → `(base_url, key, model)` for groq/mistral/gemini/openai.
   Adding a provider = adding one dictionary row.
-- `backend/src/providers/index.ts` — same idea for movie data (`mock`|`tmdb`).
+- `backend/src/providers/index.ts` — `createMovieDataAdapter` builds the raw
+  provider for movie data (`mock`|`tmdb`) and composes it with the
+  `providers/decorators.ts` resilience stack (cache → quota-gate → retry →
+  timeout); adding a provider = one implementation + one env value.
+- `backend/src/providers/decorators.ts` — timeouts, retries with backoff, rate-
+  limit/cooldown handling, TTL cache with stale-on-error, and `attribution`
+  metadata. Route code never touches these concerns.
+- `backend/src/services/ingestion.ts` + `backend/src/jobs/` — persist provider
+  facts into Supabase (idempotent by `unique(provider, provider_id)`,
+  delete-then-insert child rows, `movie_sources.revision` increments) from a
+  background worker, never from HTTP handlers.
 - `docs/providers.md` — how to add new providers and what to test.
 
 ### Observability
@@ -492,11 +573,11 @@ one home, so changes stay small and localized.
 ## Testing
 
 ```bash
-# Backend (vitest) — 26 tests
+# Backend (vitest) — 210 tests
 pnpm --filter @cinemind/backend test
 pnpm --filter @cinemind/backend typecheck
 
-# Frontend (vitest) — 7 tests
+# Frontend (vitest) — 30 tests
 pnpm --filter @cinemind/frontend test
 pnpm --filter @cinemind/frontend typecheck
 
@@ -520,17 +601,45 @@ What the tests cover:
   ownership scoping across users, add/list/remove, 409 duplicate conflict,
   validation 400s (missing, oversized, malformed JSON), and rate limiting
   (3-budget → 429 with `RATE_LIMIT_EXCEEDED`).
+- Backend providers (new): provider timeout/retry/backoff, retry-after
+  honored, never-retry on 404/invalid, quota cooldown fast-fail, TTL cache
+  hit + stale-on-error; TMDB adapter normalization (missing fields, 404→null,
+  429/401/403 → normalized provider errors) and every capability; adapter
+  routes with `x-provider`/`x-provider-cache` headers and attribution; admin
+  job endpoints (401/403/202/list/get/400).
+- Backend ingestion + worker: idempotent duplicate ingest with stable child
+  rows and `movie_sources.revision` bumping, missing optional relations,
+  NOT_FOUND with no rows, `includeRelations=false`, worker refresh_movie,
+  duplicate-enqueue idempotency, attempt exhaustion to `failed`, and
+  `refresh_upcoming` fan-out only for unknown movies.
+- Backend social features (new): rating upsert semantics + category validation
+  (bad category, too many, duplicate-in-payload) + cross-user isolation +
+  DB-only summary kept separate from external ratings; review CRUD with
+  ownership enforced as 404-not-403, duplicate-review 409, length validation
+  boundaries, pagination, all 4 sort orders, idempotent like/unlike reflected
+  in `likesCount`, duplicate-report 409, spoiler flag round-trip; moderation
+  403s for non-admins on all 3 endpoints and admin resolve/force-delete;
+  favorites + watch-history CRUD/ownership; profile stats scoped per caller.
 - Frontend: API client sends the bearer token, omits it when signed out,
-  parses provenance, surfaces backend error messages and 401s; `RequireAuth`
-  renders for signed-in users, redirects guests to login, and waits for the
-  session restore instead of flashing the login form.
+  parses provenance, surfaces backend error messages and 401s, GET
+  `/movies/upcoming?limit=N`, `DELETE /watchlist/:id`, and the new
+  ratings/reviews/favorites/profile-stats methods; `RequireAuth` renders for
+  signed-in users, redirects guests to login, and waits for the session
+  restore instead of flashing the login form; `useClientPagination` slices
+  pages and clamps when the result set shrinks; `ReviewCard`'s spoiler gate
+  keeps the review body entirely out of the DOM until the reader clicks "Show
+  anyway"; `CategoryRatingInput` and `FavoriteButton` cover their interaction
+  contracts.
 - AI service: provider name on health, facts-cited response with provenance and
   **no reasoning field**, invalid message shapes → 422, safe behavior with no
   quoted title, and sanitize stripping instruction blocks.
-- Database (`supabase/tests/database/cinemind_tests.sql`): all 21 tables exist,
-  seed fixture counts, uniqueness violations (23505), RLS ownership rules
-  (anon / authenticated / admin / service_role), and column-level grants on
-  `profiles.role`. See `docs/database.md`.
+- Database (`supabase/tests/database/cinemind_tests.sql`): all 25 tables exist,
+  seed fixture counts, uniqueness violations (23505, incl. category scores and
+  duplicate reports), RLS ownership rules (anon / authenticated / admin /
+  service_role) including likes/reports, column-level grants on
+  `profiles.role` **and** `reviews.likes_count`/`report_count`, and the
+  `likes_count` trigger staying in sync with `review_likes`. See
+  `docs/database.md`.
 
 ---
 
@@ -582,9 +691,13 @@ CineMind/
 │   └── src/
 │       ├── auth/             token verifiers, role middleware, profile store
 │       ├── services/         typed Supabase admin client (service-role, server-only)
-│       ├── providers/        MovieDataProvider: mock | tmdb (config-selected)
+│       │                     + Supabase ingestion store (persist provider facts)
+│       ├── providers/        MovieDataProvider: mock | tmdb + decorators.ts
+│       │                     (cache / quota-gate / retry / timeout) + errors.ts
+│       ├── jobs/             ingestion job store (Supabase/InMemory) + worker
+│       ├── worker.ts         worker process entrypoint (poll + process jobs)
 │       ├── middleware/       error handler, request log
-│       └── routes/           health, movies, auth, watchlist
+│       └── routes/           health, movies, auth, watchlist, admin jobs
 ├── ai-service/python/        FastAPI + Pydantic
 │   └── src/cinemind_ai/
 │       ├── providers.py      LLM selector (rule-based|openai|groq|mistral|gemini)
@@ -602,16 +715,21 @@ CineMind/
 
 ## Known limitations & roadmap
 
-- **Watchlist store**: the backend ships an in-memory `WatchlistStore` for dev.
-  A Supabase-backed store behind the same interface is the next step.
-- **Database apply**: `supabase db push` requires a linked project; the SQL is
-  not covered by automated tests yet.
+- **Database apply**: `supabase db push` requires a linked project; the pgTAP
+  suite (`supabase/tests/database/cinemind_tests.sql`) needs the Supabase CLI
+  and Docker to run, and isn't part of this repo's default CI/dev loop yet.
 - **Live LLM test**: provider calls are covered by interface + offline tests;
   a live-key smoke test is run manually (`curl /health` shows the provider).
 - **Root lint/test plumbing**: `pnpm -r lint` aggregation is defined but each
   package runs its own script today.
+- **Admin moderation UI**: the moderation backend (report triage, review
+  status overrides) is fully built and tested, but there's no admin frontend
+  page yet — admins act via direct API calls (`docs/moderation.md`) until one
+  is built.
 
 ---
 
 _Architecture, provider, and security details live in `docs/architecture.md`,
-`docs/providers.md`, and `docs/security.md`._
+`docs/providers.md`, and `docs/security.md`. Ratings, reviews, moderation, and
+watchlist/favorites/profile-stats details live in `docs/ratings.md`,
+`docs/reviews.md`, `docs/moderation.md`, and `docs/watchlist-favorites.md`._

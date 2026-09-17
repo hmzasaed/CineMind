@@ -3,6 +3,7 @@ import { ZodError } from "zod";
 import { AppError } from "../errors.js";
 import { getErrorMessage } from "../util.js";
 import type { Logger } from "../logger.js";
+import { ProviderError, providerHttpStatus } from "../providers/errors.js";
 
 /**
  * Client-safe messages for Fastify's own 4xx errors (JSON body parse errors,
@@ -51,6 +52,19 @@ export function errorHandler(logger: Logger) {
           details: error.issues.map((i) => ({ path: i.path.join("."), message: i.message })),
         },
       });
+      return;
+    }
+    if (error instanceof ProviderError) {
+      const { status, code } = providerHttpStatus(error);
+      const body: Record<string, string> = {
+        code,
+        message: `${error.provider}: provider request failed`,
+      };
+      if (error.retryAfterMs !== undefined) {
+        body.retryAfter = String(Math.ceil(error.retryAfterMs / 1000));
+      }
+      logger.warn({ rel: req.id, err: error.message, provider: error.provider, code: error.code }, "provider error");
+      void reply.code(status).send({ error: body });
       return;
     }
 

@@ -10,6 +10,8 @@ supabase/
   migrations/
     00001_initial_schema.sql      # 21-table normalized MVP schema + RLS
     00002_seed_reference_data.sql # deterministic reference + demo fixtures
+    00003_ingestion_schema.sql    # production companies + ingestion job queue
+    00004_social_features.sql     # spoiler flag, like/report counters, category ratings, profile stats
   tests/
     database/
       cinemind_tests.sql          # pgTAP suite (supabase db test)
@@ -53,19 +55,24 @@ assertion script shipped in this repo:
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
   -f supabase/migrations/00001_initial_schema.sql \
   -f supabase/migrations/00002_seed_reference_data.sql \
+  -f supabase/migrations/00003_ingestion_schema.sql \
+  -f supabase/migrations/00004_social_features.sql \
   -f supabase/tests/database/cinemind_tests.sql
 ```
 
 The tests assert, at minimum:
 
-- presence of all 21 tables;
+- presence of all 25 tables;
 - seed counts (19 genres, 5 movies, 24 cast rows, …);
 - uniqueness violations raise `23505` (slug, source natural key, watchlist,
-  review, rating);
-- RLS: `anon` reads the catalog but can write nothing, `authenticated` can only
-  write its own rows, admins can moderate, `service_role` alone can see
-  `agent_runs`/`agent_tool_calls`;
-- `profiles.role` is not client-updatable (column-level grant).
+  review, rating, category score, duplicate report);
+- RLS: `anon` reads the catalog but can write nothing (including likes/reports),
+  `authenticated` can only write its own rows, admins can moderate,
+  `service_role` alone can see `agent_runs`/`agent_tool_calls`;
+- `profiles.role` and `reviews.likes_count`/`report_count` are not
+  client-updatable (column-level grants — see "Trigger-maintained counters"
+  below);
+- the `likes_count` trigger stays in sync with `review_likes` rows.
 
 ## Table reference
 
@@ -92,6 +99,10 @@ The tests assert, at minimum:
 | 19 | `messages` | Chat messages | conversation owner |
 | 20 | `agent_runs` | AI run audit (summaries only) | service_role |
 | 21 | `agent_tool_calls` | Bounded tool-call trace | service_role |
+| 22 | `production_companies` | Company facts (retrieved via provider) | server pipelines |
+| 23 | `movie_production_companies` | N:M movies × companies | server pipelines |
+| 24 | `ingestion_jobs` | Ingestion job queue (worker claimable) | service_role |
+| 25 | `movie_rating_categories` | Optional acting/story/visuals/sound/pacing sub-scores | owner (of the parent rating) |
 
 ## Provenance & conflict model
 
@@ -109,6 +120,23 @@ concurrency for fact updates. This is how CineMind resolves disagreements
 between sources without letting an LLM be authoritative: the database keeps
 the facts, the conflict state is explicit, and prompt responses cite rows from
 these tables.
+
+`00003` adds the ingestion support tables:
+
+- `production_companies` + `movie_production_companies` — provider-retrieved
+  company facts with the same provenance spine as the rest of the catalog
+  (`provider`, `retrieved_at`, `confidence`) and a natural key
+  `unique(provider, provider_id)`. Companies are replaced per movie on
+  re-ingest, mirroring cast/crew.
+- `ingestion_jobs` — the worker's queue. Rows carry a `kind`
+  (`refresh_movie` | `refresh_upcoming`), a status (`pending` | `running` |
+  `succeeded` | `failed` | `cancelled`), attempt bookkeeping
+  (`attempts`, `max_attempts`), a bounded `payload` JSONB object, and
+  `scheduled_for` for retry backoff (a partial index covers
+  `(status, scheduled_for) where status = 'pending'`). There are **no**
+  client policies: only `service_role` can read/write it, so ingestion can
+  never be triggered directly from the browser — only via admin endpoints and
+  the worker.
 
 ## Security model
 
@@ -130,6 +158,31 @@ these tables.
      owners — `reviews` uses a single owner-or-admin UPDATE policy instead.
   2. The **new row of an UPDATE must pass the SELECT policies** too, so the
      reviews SELECT policy lets owners see their own rows in any status.
+
+### Trigger-maintained counters (00004)
+
+`reviews.likes_count` and `reviews.report_count` are written **only** by two
+`security definer` trigger functions (`review_likes_count_sync`,
+`review_reports_count_sync`), fired on `review_likes`/`review_reports`
+inserts (and, for likes, deletes). 00004 also **backfills both counters** from
+the existing `review_likes`/`review_reports` rows — a trigger only fires on
+new writes, so without the backfill any row that predates the migration (seed
+data, or a live deployment's existing likes) stays permanently uncounted.
+This exists because 00001's blanket `grant
+update on reviews to authenticated` would otherwise let any review owner set
+their own `likes_count` to an arbitrary number via a raw PostgREST call —
+00004 revokes that grant and re-grants it column-by-column (`title, body,
+rating, language_code, status, has_spoilers` only), the same class of fix
+`profiles.role`'s column grant already applied. The trigger functions need
+`security definer` specifically because they must write past that
+just-revoked grant. See [reviews.md](reviews.md) and
+[moderation.md](moderation.md) for the application-level view of this.
+
+Similarly, `public.get_profile_stats(p_user_id uuid)` (00004) is
+`security definer` with `execute` revoked from `PUBLIC`/`anon`/`authenticated`
+and granted only to `service_role` — see
+[watchlist-favorites.md](watchlist-favorites.md) for why it takes an explicit
+parameter instead of reading `auth.uid()`.
 
 ## Deterministic seed fixtures
 

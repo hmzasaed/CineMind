@@ -2,8 +2,6 @@ import type { Fact } from "../types.js";
 import {
   mkProvenance,
   type Attribution,
-  type CastCredit,
-  type CrewCredit,
   type MovieCredits,
   type MovieDataAdapter,
   type MovieDetail,
@@ -171,7 +169,14 @@ export class MockProvider implements MovieDataAdapter {
   }
 
   async getMovie(id: string): Promise<Fact<MovieDetail | null>> {
-    const value = FACTS[id]?.movie ?? null;
+    let value = FACTS[id]?.movie ?? null;
+    if (!value) {
+      const lower = id.toLowerCase();
+      const match = Object.values(FACTS).find(
+        (f) => f.movie.title.toLowerCase() === lower || f.movie.id.toLowerCase() === lower
+      );
+      if (match) value = match.movie;
+    }
     return { value, provenance: mkProvenance("mock", "static", `mock:movie:${id}`, 1) };
   }
 

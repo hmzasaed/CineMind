@@ -5,22 +5,91 @@ configuration. Adding a provider never requires touching route code.
 
 ## Movie data providers (backend)
 
-Interface: `backend/src/providers/types.ts` (`MovieDataProvider`).
+The backend has a two-layer movie-data interface:
+
+- `backend/src/providers/types.ts` (`MovieDataProvider`) — the raw source
+  contract. One method per capability, each returning `Fact<T|null>`.
+- `backend/src/providers/decorators.ts` (`MovieDataAdapter`) — the resilient
+  adapter used by routes: every raw provider is composed through
+  **cache → quota-gate → retry → timeout** decorators, so resilience lives in
+  one place and never in route code.
 
 Implemented: `mock` (static facts), `tmdb` (structured API).
 
 Config: `MOVIE_PROVIDER` selects the implementation. Secrets stay in env.
+`createMovieDataAdapter(config)` in `providers/index.ts` builds the raw
+provider and wraps it.
 
-To add a provider (e.g. IMDb or a licensed dataset):
+### Capabilities
 
-1. Implement `MovieDataProvider` in `providers/`.
-2. Parse all responses with a Zod schema; refuse payloads that don't validate.
-3. Return `Fact<MovieRecord>` — facts only, never synthesized values.
-4. Register it in `providers/index.ts` behind a new env value.
-5. Give it a distinct `sourceName` and `sourceKind` (e.g. `api`).
+| Capability | `MovieDataProvider` method | Route |
+| ---------- | -------------------------- | ----- |
+| Movie detail | `getMovie(id)` | `GET /movies/:id` |
+| Search | `searchMovies(query)` | `GET /movies?title=&year=` |
+| Upcoming | `getUpcoming(options)` | `GET /movies/upcoming` |
+| Credits | `getCredits(id)` | `GET /movies/:id/credits` |
+| Images | `getImages(id)` | `GET /movies/:id/images` |
+| Ratings | `getRatings(id)` | `GET /movies/:id/ratings` |
+| Production companies | `getCompanies(id)` | `GET /movies/:id/companies` |
+| Financials | `getFinancials(id)` | `GET /movies/:id/financials` |
 
-Convention: unknown ids return null (404), provider outages throw and are mapped
-to a backend 502 by the caller, never to a synthesized movie.
+Not every provider must implement every capability: unsupported capabilities
+return a null-valued `Fact`, and the route answers 404. `getMovie` never
+returns an empty record and never falls back to a mock when the real source
+fails.
+
+### Resilience & errors
+
+- `providers/errors.ts` — `ProviderError` with an error code
+  (`NOT_FOUND`, `INVALID_RESPONSE`, `UPSTREAM_TIMEOUT`, `UPSTREAM`,
+  `UPSTREAM_RATE_LIMITED`, `UPSTREAM_QUOTA`), a status, an optional
+  `retryAfterMs`, and an attempt count. `isRetryable` / `isTransient`
+  classify errors; `providerHttpStatus` maps them to HTTP responses.
+- `providers/decorators.ts` — applied in this order per method:
+  1. `Cache` — TTL cache (default 5 min, `PROVIDER_CACHE_TTL_MS`); on a
+     transient failure, serves a **stale** entry when
+     `PROVIDER_CACHE_STALE_ON_ERROR=true`. Exposed as
+     `x-provider-cache: hit | miss | stale`.
+  2. `QuotaGate` — after a 429, blocks further calls until the cooldown ends,
+     failing fast with `UPSTREAM_QUOTA` instead of hammering the API.
+  3. `withRetry` — retries transient errors with exponential backoff + jitter
+     (`PROVIDER_RETRY_LIMIT`, `PROVIDER_BASE_BACKOFF_MS`), honoring
+     `retryAfterMs` (capped at 60 s). Never retries `NOT_FOUND` /
+     `INVALID_RESPONSE`.
+  4. `withTimeout` — aborts a hung request after `PROVIDER_TIMEOUT_MS`
+     (`UPSTREAM_TIMEOUT`).
+
+### Attribution
+
+Every adapter carries `attribution` (`licensed: boolean`, `title`, `termsUrl`).
+The TMDB adapter sets `licensed: true` with the TMDB terms URL and **never
+scrapes the web**; when TMDB is configured it is the only movie-data source.
+The mock adapter is `licensed: false` and labelled "test only" — it must never
+be used in production.
+
+### Ingestion & jobs
+
+The adapter feeds facts into Supabase via `services/ingestion.ts`
+(`ingestMovie`), which is idempotent by `unique(provider, provider_id)` on
+`movies.movie_sources`; re-ingests bump `movie_sources.revision` and rebuild
+relation rows (delete-then-insert). Ingestion runs **only** from the worker
+(`jobs/worker.ts`, entrypoint `backend/src/worker.ts`), never inside an HTTP
+request:
+
+- `refresh_movie` — ingest one movie by id (created on demand as `refresh_movie`
+  jobs fan out from `refresh_upcoming` for movies the DB doesn't know yet).
+- Job stores are `jobs/store.ts` (`SupabaseIngestionJobStore` /
+  `InMemoryIngestionJobStore`, selected like the ingestion store); the Supabase
+  store claims and locks rows with optimistic concurrency.
+- An admin can enqueue/inspect jobs: `POST /admin/jobs` (202), `GET /admin/jobs`,
+  `GET /admin/jobs/:id` (all `JWT + admin`).
+
+To add a provider: implement `MovieDataProvider`, validate every response with a
+Zod schema, return `Fact<T>` (facts only, never synthesized values), register it
+in `providers/index.ts` behind a new env value, and give it a distinct
+`sourceName` / `sourceKind`. Convention: unknown ids return null (404); outages
+throw `ProviderError` mapped to 502/504/429 by the error handler — never a
+synthesized movie.
 
 ## LLM providers (ai-service)
 

@@ -2,19 +2,24 @@
 -- CineMind MVP — database tests (pgTAP)
 -- -----------------------------------------------------------------------------
 -- Runnable via:  supabase db test
--- Requires migrations 00001 + 00002 (seeds) to be applied first.
+-- Requires migrations 00001 + 00002 + 00003 (seeds) to be applied first.
 --
 -- Covers:
---   * presence of the 21 expected tables
+--   * presence of the 25 expected tables (24 + movie_rating_categories)
 --   * seed fixture counts / determinism
 --   * uniqueness constraints (23505)
 --   * ownership + RLS rules (42501) across anon / authenticated / admin
---   * column-level grants (profiles.role is not client-updatable)
+--   * column-level grants (profiles.role AND reviews.likes_count/report_count
+--     are not client-updatable — the latter guards the 00004 grant-revoke fix)
 --   * agent observability tables are invisible to clients (no grants)
+--   * ingestion job queue is restricted to service_role (no client grants)
+--   * review_likes/review_reports moderation rules (anon blocked, duplicate
+--     reports rejected, only admins resolve reports)
+--   * the likes_count trigger stays in sync with review_likes rows
 -- =============================================================================
 
 begin;
-select plan(49);
+select plan(64);
 
 -- ── tables exist ─────────────────────────────────────────────────────────────
 select has_table('public', 'profiles',         'profiles table exists');
@@ -38,6 +43,10 @@ select has_table('public', 'conversations',    'conversations table exists');
 select has_table('public', 'messages',         'messages table exists');
 select has_table('public', 'agent_runs',       'agent_runs table exists');
 select has_table('public', 'agent_tool_calls', 'agent_tool_calls table exists');
+select has_table('public', 'production_companies', 'production_companies table exists');
+select has_table('public', 'movie_production_companies', 'movie_production_companies table exists');
+select has_table('public', 'ingestion_jobs',   'ingestion_jobs table exists');
+select has_table('public', 'movie_rating_categories', 'movie_rating_categories table exists');
 
 -- ── deterministic seed fixtures ──────────────────────────────────────────────
 select results_eq(
@@ -96,6 +105,30 @@ select throws_ok(
   '23505', null,
   'movie_ratings (user_id, movie_id) unique enforced'
 );
+-- movie_rating_categories: unique (movie_rating_id, category)
+insert into public.movie_rating_categories (movie_rating_id, category, score)
+values (
+  (select id from public.movie_ratings
+   where user_id = '00000000-0000-4000-8000-0000000000a1' and movie_id = 'a1000000-0000-4000-8000-000000000001'),
+  'acting', 9
+);
+select throws_ok(
+  $$ insert into public.movie_rating_categories (movie_rating_id, category, score)
+     values (
+       (select id from public.movie_ratings
+        where user_id = '00000000-0000-4000-8000-0000000000a1' and movie_id = 'a1000000-0000-4000-8000-000000000001'),
+       'acting', 5
+     ) $$,
+  '23505', null,
+  'movie_rating_categories (movie_rating_id, category) unique enforced'
+);
+-- review_reports: unique (review_id, reporter_id) — a1 already reported this review in seed data
+select throws_ok(
+  $$ insert into public.review_reports (review_id, reporter_id, reason)
+     values ('a3000000-0000-4000-8000-000000000002', '00000000-0000-4000-8000-0000000000a1', 'other') $$,
+  '23505', null,
+  'review_reports (review_id, reporter_id) unique enforced'
+);
 
 -- ── RLS + ownership: anon ────────────────────────────────────────────────────
 set local role anon;
@@ -114,6 +147,18 @@ select throws_ok(
      values ('00000000-0000-4000-8000-0000000000a1', 'a1000000-0000-4000-8000-000000000001', repeat('x', 40)) $$,
   '42501', null,
   'anon cannot insert reviews'
+);
+select throws_ok(
+  $$ insert into public.review_likes (user_id, review_id)
+     values ('00000000-0000-4000-8000-0000000000a1', 'a3000000-0000-4000-8000-000000000001') $$,
+  '42501', null,
+  'anon cannot like a review'
+);
+select throws_ok(
+  $$ insert into public.review_reports (review_id, reporter_id, reason)
+     values ('a3000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-0000000000a1', 'spam') $$,
+  '42501', null,
+  'anon cannot report a review'
 );
 reset role;
 
@@ -161,6 +206,37 @@ select lives_ok(
   $$ insert into public.movie_ratings (user_id, movie_id, score) values ('00000000-0000-4000-8000-0000000000a1', 'a1000000-0000-4000-8000-000000000003', 7) $$,
   'user can rate a new movie'
 );
+-- cannot insert a category score against another user's rating
+select throws_ok(
+  $$ insert into public.movie_rating_categories (movie_rating_id, category, score)
+     values (
+       (select id from public.movie_ratings
+        where user_id = '00000000-0000-4000-8000-0000000000a2' and movie_id = 'a1000000-0000-4000-8000-000000000001'),
+       'story', 6
+     ) $$,
+  '42501', null,
+  'user cannot add a category score to another user''s rating'
+);
+-- reviews.likes_count / report_count are not client-updatable, even on own review
+-- (guards the 00004 grant-revoke fix: only the trigger functions may write these)
+select throws_ok(
+  $$ update public.reviews set likes_count = 999 where id = 'a3000000-0000-4000-8000-000000000001' $$,
+  '42501', null,
+  'user cannot directly set likes_count on own review (column grant revoked)'
+);
+select throws_ok(
+  $$ update public.reviews set report_count = 999 where id = 'a3000000-0000-4000-8000-000000000001' $$,
+  '42501', null,
+  'user cannot directly set report_count on own review (column grant revoked)'
+);
+-- reporters cannot resolve their own report — only admins may
+select throws_ok(
+  $$ update public.review_reports set status = 'dismissed'
+     where review_id = 'a3000000-0000-4000-8000-000000000002'
+       and reporter_id = '00000000-0000-4000-8000-0000000000a1' $$,
+  '42501', null,
+  'reporter cannot resolve their own report (admin-only)'
+);
 -- profile: role column not client-updatable (column-level grant)
 select throws_ok(
   $$ update public.profiles set role = 'admin' where id = '00000000-0000-4000-8000-0000000000a1' $$,
@@ -207,6 +283,30 @@ select results_eq(
 select lives_ok(
   $$ update public.reviews set status = 'hidden' where id = 'a3000000-0000-4000-8000-000000000002' $$,
   'admin can hide any review'
+);
+select lives_ok(
+  $$ update public.review_reports set status = 'dismissed'
+     where review_id = 'a3000000-0000-4000-8000-000000000002'
+       and reporter_id = '00000000-0000-4000-8000-0000000000a1' $$,
+  'admin can resolve a report'
+);
+
+-- likes_count trigger: stays in sync with review_likes rows.
+-- Review a3...0001 starts with 1 like (from a2, seeded). Admin (a3) adds a
+-- second like, then removes it, and the counter must move with each change.
+insert into public.review_likes (user_id, review_id)
+values ('00000000-0000-4000-8000-0000000000a3', 'a3000000-0000-4000-8000-000000000001');
+select results_eq(
+  $$ select likes_count from public.reviews where id = 'a3000000-0000-4000-8000-000000000001' $$,
+  array[2],
+  'likes_count trigger increments on review_likes insert'
+);
+delete from public.review_likes
+where user_id = '00000000-0000-4000-8000-0000000000a3' and review_id = 'a3000000-0000-4000-8000-000000000001';
+select results_eq(
+  $$ select likes_count from public.reviews where id = 'a3000000-0000-4000-8000-000000000001' $$,
+  array[1],
+  'likes_count trigger decrements on review_likes delete'
 );
 reset role;
 

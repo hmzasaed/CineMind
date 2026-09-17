@@ -13,29 +13,64 @@
 
 begin;
 
--- ── demo users (auth schema; bcrypt hash of "password") ─────────────────────
+-- ── demo users (auth schema) ────────────────────────────────────────────────
+-- The literal hash below is a placeholder; the UPDATE that follows is what
+-- authoritatively sets the password to "password" via pgcrypto, so the two can
+-- never drift apart.
 insert into auth.users (
   instance_id, id, aud, role, email, encrypted_password,
   email_confirmed_at, created_at, updated_at,
   raw_app_meta_data, raw_user_meta_data, is_super_admin, is_sso_user
 )
 values
-  ('00000000-0000-4000-8000-000000000000', '00000000-0000-4000-8000-0000000000a1',
+  ('00000000-0000-0000-0000-000000000000', '00000000-0000-4000-8000-0000000000a1',
    'authenticated', 'authenticated', 'demo1@cinemind.example',
    '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy',
    now(), now(), now(), '{"provider":"email","providers":["email"]}'::jsonb,
    '{"name":"Demo One"}'::jsonb, false, false),
-  ('00000000-0000-4000-8000-000000000000', '00000000-0000-4000-8000-0000000000a2',
+  ('00000000-0000-0000-0000-000000000000', '00000000-0000-4000-8000-0000000000a2',
    'authenticated', 'authenticated', 'demo2@cinemind.example',
    '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy',
    now(), now(), now(), '{"provider":"email","providers":["email"]}'::jsonb,
    '{"name":"Demo Two"}'::jsonb, false, false),
-  ('00000000-0000-4000-8000-000000000000', '00000000-0000-4000-8000-0000000000a3',
+  ('00000000-0000-0000-0000-000000000000', '00000000-0000-4000-8000-0000000000a3',
    'authenticated', 'authenticated', 'admin@cinemind.example',
    '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy',
    now(), now(), now(), '{"provider":"email","providers":["email"]}'::jsonb,
    '{"name":"Admin"}'::jsonb, false, false)
 on conflict (id) do nothing;
+
+-- Self-heal the demo credentials so they can actually sign in. Two things go
+-- wrong with hand-written auth.users rows, both verified against a live
+-- Supabase project:
+--   1. A copy-pasted bcrypt literal may not be a hash of the documented
+--      password at all, so every login returns invalid_credentials. Generating
+--      it with pgcrypto's crypt()/gen_salt('bf') guarantees it matches.
+--   2. GoTrue scans the token columns into non-nullable Go strings, so a NULL
+--      (rather than '') in any of them breaks sign-in and token refresh for
+--      that user.
+-- Idempotent: the WHERE clause makes a correctly-seeded row a no-op.
+update auth.users
+set encrypted_password        = crypt('password', gen_salt('bf')),
+    email_confirmed_at        = coalesce(email_confirmed_at, now()),
+    confirmation_token        = coalesce(confirmation_token, ''),
+    recovery_token            = coalesce(recovery_token, ''),
+    email_change              = coalesce(email_change, ''),
+    email_change_token_new    = coalesce(email_change_token_new, ''),
+    email_change_token_current = coalesce(email_change_token_current, ''),
+    phone_change              = coalesce(phone_change, ''),
+    phone_change_token        = coalesce(phone_change_token, ''),
+    reauthentication_token    = coalesce(reauthentication_token, ''),
+    updated_at                = now()
+where email in ('demo1@cinemind.example', 'demo2@cinemind.example', 'admin@cinemind.example')
+  and (
+    encrypted_password is distinct from crypt('password', encrypted_password)
+    or email_confirmed_at is null
+    or confirmation_token is null or recovery_token is null
+    or email_change is null or email_change_token_new is null
+    or email_change_token_current is null or phone_change is null
+    or phone_change_token is null or reauthentication_token is null
+  );
 
 -- ── profiles ─────────────────────────────────────────────────────────────────
 insert into public.profiles (id, username, display_name, role)

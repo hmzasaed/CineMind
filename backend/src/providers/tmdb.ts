@@ -37,7 +37,16 @@ const movieSchema = z.object({
   id: z.number().int().positive(),
   title: z.string().min(1),
   original_title: z.string().optional(),
-  release_date: z.string().regex(/^\d{4}(-\d{2}){2}$/).optional(),
+  // TMDB sends release_date: "" for titles with no announced date (and omits
+  // it entirely for others). Treating a blank as "unknown" rather than a
+  // validation failure matters because these schemas validate whole result
+  // pages: one dateless title in a 20-result search would otherwise reject
+  // the entire response and surface as a 502.
+  release_date: z
+    .string()
+    .regex(/^\d{4}(-\d{2}){2}$/)
+    .optional()
+    .or(z.literal("").transform(() => undefined)),
   runtime: z.number().int().nonnegative().nullable().optional(),
   overview: z.string().nullable().optional(),
   tagline: z.string().nullable().optional(),
@@ -128,15 +137,28 @@ function joinUrl(baseUrl: string, path: string): string {
   return `${baseUrl.replace(/\/+$/, "")}/${path.replace(/^\/+/, "")}`;
 }
 
-function posterUrl(baseUrl: string, path?: string | null): string | undefined {
-  return path ? joinUrl(baseUrl, `t/p/w500${path}`) : undefined;
+/**
+ * TMDB serves images from a dedicated CDN, NOT from the API host — building
+ * image URLs on TMDB_API_BASE_URL yields api.themoviedb.org/3/t/p/... which
+ * 404s, so every poster silently falls back to a placeholder. This is a fixed
+ * origin rather than a configurable one because it is not the API base and
+ * must not drift with it.
+ */
+const TMDB_IMAGE_BASE = "https://image.tmdb.org";
+
+function imageUrl(size: string, path?: string | null): string | undefined {
+  return path ? joinUrl(TMDB_IMAGE_BASE, `t/p/${size}${path}`) : undefined;
 }
 
-function backdropUrl(baseUrl: string, path?: string | null): string | undefined {
-  return path ? joinUrl(baseUrl, `t/p/w780${path}`) : undefined;
+function posterUrl(path?: string | null): string | undefined {
+  return imageUrl("w500", path);
 }
 
-function toRecord(m: ParsedMovie, baseUrl: string): MovieRecord {
+function backdropUrl(path?: string | null): string | undefined {
+  return imageUrl("w780", path);
+}
+
+function toRecord(m: ParsedMovie): MovieRecord {
   return {
     id: String(m.id),
     title: m.title,
@@ -149,14 +171,14 @@ function toRecord(m: ParsedMovie, baseUrl: string): MovieRecord {
       m.vote_average !== undefined && m.vote_count !== undefined
         ? { average: m.vote_average, votes: m.vote_count }
         : undefined,
-    posterPath: posterUrl(baseUrl, m.poster_path),
-    backdropPath: backdropUrl(baseUrl, m.backdrop_path),
+    posterPath: posterUrl(m.poster_path),
+    backdropPath: backdropUrl(m.backdrop_path),
   };
 }
 
-function toDetail(m: ParsedMovie, baseUrl: string): MovieDetail {
+function toDetail(m: ParsedMovie): MovieDetail {
   return {
-    ...toRecord(m, baseUrl),
+    ...toRecord(m),
     tagline: m.tagline ?? undefined,
     imdbId: m.imdb_id ?? undefined,
     externalIds:
@@ -170,7 +192,7 @@ function toDetail(m: ParsedMovie, baseUrl: string): MovieDetail {
         ({
           id: String(c.id),
           name: c.name,
-          logoPath: c.logo_path ? joinUrl(baseUrl, `t/p/w92${c.logo_path}`) : undefined,
+          logoPath: imageUrl("w92", c.logo_path),
           originCountry: c.origin_country,
         }) satisfies ProductionCompany,
     ),
@@ -202,7 +224,7 @@ export class TmdbProvider implements MovieDataAdapter {
     return this.asNullable(`tmdb:movie:${id}`, async () => {
       const movie = await this.fetchMovie(id);
       return {
-        value: toDetail(movie, this.baseUrl),
+        value: toDetail(movie),
         provenance: mkProvenance("tmdb", "api", `tmdb:movie:${id}`, 0.99),
       };
     });
@@ -218,7 +240,7 @@ export class TmdbProvider implements MovieDataAdapter {
     }
     const results = parsed.data.results
       .slice(0, query.limit ?? 10)
-      .map((m) => toRecord(m, this.baseUrl));
+      .map((m) => toRecord(m));
     return {
       value: results,
       provenance: mkProvenance("tmdb", "api", `tmdb:search:${query.title}`, 0.9),
@@ -233,7 +255,7 @@ export class TmdbProvider implements MovieDataAdapter {
     }
     const results = parsed.data.results
       .slice(0, options?.limit ?? 10)
-      .map((m) => toRecord(m, this.baseUrl));
+      .map((m) => toRecord(m));
     return {
       value: results,
       provenance: mkProvenance("tmdb", "api", "tmdb:upcoming", 0.9),
@@ -253,7 +275,7 @@ export class TmdbProvider implements MovieDataAdapter {
         character: c.character,
         order: c.order,
         gender: gender(c.gender),
-        profilePath: posterUrl(this.baseUrl, c.profile_path),
+        profilePath: posterUrl(c.profile_path),
         creditId: c.credit_id,
       }));
       const crew: CrewCredit[] = parsed.data.crew.map((c) => ({
@@ -262,7 +284,7 @@ export class TmdbProvider implements MovieDataAdapter {
         department: c.department,
         job: c.job,
         gender: gender(c.gender),
-        profilePath: posterUrl(this.baseUrl, c.profile_path),
+        profilePath: posterUrl(c.profile_path),
         creditId: c.credit_id,
       }));
       return {
@@ -280,7 +302,7 @@ export class TmdbProvider implements MovieDataAdapter {
         throw this.invalidResponse("images", id, parsed.error);
       }
       const toRef = (i: z.infer<typeof imageSchema>) => ({
-        path: joinUrl(this.baseUrl, `t/p/original${i.file_path}`),
+        path: imageUrl("original", i.file_path)!,
         width: i.width,
         height: i.height,
         language: i.iso_639_1 ?? undefined,
@@ -305,7 +327,7 @@ export class TmdbProvider implements MovieDataAdapter {
             ({
               id: String(c.id),
               name: c.name,
-              logoPath: c.logo_path ? joinUrl(this.baseUrl, `t/p/w92${c.logo_path}`) : undefined,
+              logoPath: imageUrl("w92", c.logo_path),
               originCountry: c.origin_country,
             }) satisfies ProductionCompany,
         ),
@@ -383,12 +405,35 @@ export class TmdbProvider implements MovieDataAdapter {
     );
   }
 
+  /**
+   * TMDB issues two credential styles and they authenticate differently:
+   * a v4 read access token (a long JWT) goes in an Authorization: Bearer
+   * header, while a classic v3 API key (32 hex chars) must be passed as an
+   * `api_key` query parameter — sending a v3 key as a Bearer token returns
+   * 401 on every request. Detect which one we were given rather than forcing
+   * users onto the v4 flow.
+   */
+  private get isV4Token(): boolean {
+    return this.apiKey.startsWith("eyJ") || this.apiKey.length > 64;
+  }
+
   private headers(): Record<string, string> {
-    return { Authorization: `Bearer ${this.apiKey}`, Accept: "application/json" };
+    const base: Record<string, string> = { Accept: "application/json" };
+    if (this.isV4Token) base.Authorization = `Bearer ${this.apiKey}`;
+    return base;
+  }
+
+  /** Appends the v3 api_key param when that's the credential style in use. */
+  private withAuth(path: string): string {
+    if (this.isV4Token) return path;
+    const sep = path.includes("?") ? "&" : "?";
+    return `${path}${sep}api_key=${encodeURIComponent(this.apiKey)}`;
   }
 
   private async getJson(path: string, endpoint: string): Promise<unknown> {
-    const res = await this.fetchImpl(joinUrl(this.baseUrl, path), { headers: this.headers() });
+    const res = await this.fetchImpl(joinUrl(this.baseUrl, this.withAuth(path)), {
+      headers: this.headers(),
+    });
     let body: unknown = null;
     try {
       body = await res.json();

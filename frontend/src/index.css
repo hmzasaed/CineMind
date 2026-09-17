@@ -1,0 +1,170 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    color-scheme: dark;
+    scroll-behavior: smooth;
+  }
+  body {
+    @apply relative bg-ink-950 text-slate-200 antialiased;
+    min-height: 100vh;
+    background-image:
+      radial-gradient(ellipse 80% 50% at 50% -10%, rgba(207, 154, 82, 0.08), transparent 60%),
+      radial-gradient(ellipse 60% 40% at 100% 0%, rgba(94, 179, 217, 0.05), transparent 60%);
+    background-attachment: fixed;
+  }
+  /* Film-grain overlay: a fixed, extremely low-opacity noise layer so every
+     surface — not just the hero — reads as filmic rather than flat digital. */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    pointer-events: none;
+    opacity: 0.035;
+    mix-blend-mode: overlay;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='140' height='140'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+  }
+  ::selection {
+    @apply bg-gold-400/30 text-white;
+  }
+  :focus-visible {
+    @apply outline-2 outline-offset-2 outline-gold-400;
+    box-shadow: 0 0 0 5px rgba(207, 154, 82, 0.16);
+    border-radius: 4px;
+  }
+  a {
+    @apply text-slate-100 no-underline;
+  }
+  img {
+    @apply select-none;
+  }
+
+  /* Custom scrollbar: dark track, bronze thumb */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: theme("colors.gold.500") theme("colors.ink.900");
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: theme("colors.ink.900");
+  }
+  ::-webkit-scrollbar-thumb {
+    background-color: theme("colors.ink.700");
+    border-radius: 999px;
+    border: 2px solid theme("colors.ink.900");
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: theme("colors.gold.500");
+  }
+
+  /* Universal, restrained press feedback on every interactive control. */
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  summary {
+    transition: transform 150ms ease, box-shadow 150ms ease, background-color 150ms ease,
+      border-color 150ms ease, color 150ms ease;
+  }
+  button:not(:disabled):active,
+  [role="button"]:not([aria-disabled="true"]):active {
+    transform: scale(0.97);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto;
+    }
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+    button:not(:disabled):active,
+    [role="button"]:not([aria-disabled="true"]):active {
+      transform: none;
+    }
+  }
+}
+
+@layer components {
+  .skeleton {
+    @apply animate-shimmer rounded-md;
+    background-image: linear-gradient(
+      100deg,
+      rgba(255, 255, 255, 0.05) 20%,
+      rgba(255, 255, 255, 0.1) 40%,
+      rgba(255, 255, 255, 0.05) 60%
+    );
+    background-size: 200% 100%;
+  }
+
+  /* Base surface: layered gradient + hairline border + inset top highlight,
+     so every card reads as a lit panel rather than a flat rectangle. */
+  .card {
+    @apply relative rounded-2xl border border-white/10 bg-gradient-to-b from-ink-800/70 to-ink-900;
+    box-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.05) inset, 0 12px 32px -20px rgba(0, 0, 0, 0.8);
+  }
+
+  /* Opt-in interactive variant: lift, copper edge light, and a light sweep
+     on hover. Used for anything users click through (grid cards, phase-like
+     panels) — never applied to static content cards. */
+  .card-interactive {
+    @apply card overflow-hidden transition duration-300 ease-cinematic;
+  }
+  .card-interactive:hover {
+    @apply -translate-y-1 border-gold-400/30;
+    box-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.08) inset, 0 24px 48px -20px rgba(0, 0, 0, 0.85),
+      0 0 0 1px rgba(207, 154, 82, 0.18);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .card-interactive:hover {
+      transform: none;
+    }
+  }
+
+  /* Frosted glass panel for chrome that floats over imagery: nav, hero CTAs,
+     the movie-page action panel. */
+  .glass {
+    @apply border border-white/10 bg-white/[0.04] backdrop-blur-xl;
+  }
+
+  .text-glow-copper {
+    text-shadow: 0 0 24px rgba(207, 154, 82, 0.25);
+  }
+
+  /* Small monospace metadata chip — used for provenance/source/confidence
+     labels so the "facts have provenance" premise reads visually distinct
+     from editorial copy. */
+  .chip-mono {
+    @apply inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1 font-mono text-[11px] uppercase tracking-wider text-mist-400;
+  }
+}
+
+@layer utilities {
+  .animate-delay-100 {
+    animation-delay: 100ms;
+  }
+  .animate-delay-200 {
+    animation-delay: 200ms;
+  }
+  .animate-delay-300 {
+    animation-delay: 300ms;
+  }
+  .animate-delay-400 {
+    animation-delay: 400ms;
+  }
+  .animate-delay-500 {
+    animation-delay: 500ms;
+  }
+  .perspective-1000 {
+    perspective: 1000px;
+  }
+}

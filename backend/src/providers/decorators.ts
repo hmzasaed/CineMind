@@ -80,8 +80,6 @@ function backoff(attempt: number, baseDelayMs: number): number {
 async function withRetry<T>(
   run: () => Promise<T>,
   opts: { maxAttempts: number; baseDelayMs: number },
-  provider: string,
-  label: string,
 ): Promise<T> {
   if (opts.maxAttempts <= 1) return run();
   let lastError: ProviderError | undefined;
@@ -104,7 +102,7 @@ async function withRetry<T>(
 class QuotaGate {
   private until = 0;
 
-  constructor(private readonly defaultCooldownMs: number) {}
+  constructor(readonly defaultCooldownMs: number) {}
 
   permit(now = Date.now()): boolean {
     return now >= this.until;
@@ -160,7 +158,7 @@ function wrap<A extends unknown[]>(
     const runAttempt = () =>
       withTimeout(() => fn(...args), ctx.timeoutMs, ctx.provider, ctx.label);
     const runWithRetry = () =>
-      withRetry(runAttempt, { maxAttempts: ctx.maxAttempts, baseDelayMs: ctx.baseDelayMs }, ctx.provider, ctx.label);
+      withRetry(runAttempt, { maxAttempts: ctx.maxAttempts, baseDelayMs: ctx.baseDelayMs });
 
     async function run() {
       if (!ctx.gate.permit()) {
